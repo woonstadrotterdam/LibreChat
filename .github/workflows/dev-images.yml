@@ -36,16 +36,37 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Log in to GitHub Container Registry
+      # Check available secrets
+      - name: Check available secrets
+        id: check-secrets
+        run: |
+          if [ -n "$GHCR_TOKEN" ]; then
+            echo "has_ghcr=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_ghcr=false" >> $GITHUB_OUTPUT
+          fi
+          if [ -n "$DOCKERHUB_USER" ] && [ -n "$DOCKERHUB_PASS" ]; then
+            echo "has_dockerhub=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_dockerhub=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_PASS: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Log in to GitHub Container Registry (optional)
       - name: Log in to GitHub Container Registry
+        if: steps.check-secrets.outputs.has_ghcr == 'true'
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Login to Docker Hub
+      # Login to Docker Hub (optional)
       - name: Login to Docker Hub
+        if: steps.check-secrets.outputs.has_dockerhub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -56,17 +77,32 @@ jobs:
         run: |
           cp .env.example .env
 
+      # Prepare tags based on available secrets
+      - name: Prepare tags
+        id: prepare-tags
+        run: |
+          {
+            if [ "${{ steps.check-secrets.outputs.has_ghcr }}" = "true" ]; then
+              echo "ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:${{ github.sha }}"
+              echo "ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:latest"
+            fi
+            if [ "${{ steps.check-secrets.outputs.has_dockerhub }}" = "true" ]; then
+              echo "${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_name }}:${{ github.sha }}"
+              echo "${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_name }}:latest"
+            fi
+          } | {
+            echo "tags<<EOF"
+            cat
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
       # Build and push Docker images for each target
       - name: Build and push Docker images
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ${{ matrix.file }}
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_name }}:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_name }}:latest
+          push: ${{ steps.check-secrets.outputs.has_ghcr == 'true' || steps.check-secrets.outputs.has_dockerhub == 'true' }}
+          tags: ${{ steps.prepare-tags.outputs.tags }}
           platforms: linux/amd64,linux/arm64
           target: ${{ matrix.target }}
